@@ -99,7 +99,7 @@ const prompts = ["rain on a skylight", "late-night train cabin", "warm analog ro
 
 // Keep in sync with the version in package.json, src-tauri/tauri.conf.json, and
 // src-tauri/Cargo.toml — those are what actually drive the build; this is just for display.
-const APP_VERSION = "1.0.9";
+const APP_VERSION = "1.0.10";
 
 export default function Home() {
   const [query, setQuery] = useState("");
@@ -143,15 +143,42 @@ export default function Home() {
   const audioRef = useRef<HTMLAudioElement>(null);
   const [outputDevices, setOutputDevices] = useState<MediaDeviceInfo[]>([]);
   const [outputDeviceId, setOutputDeviceId] = useState(() => localStorage.getItem(OUTPUT_DEVICE_KEY) || "");
+  const [deviceDiagnostic, setDeviceDiagnostic] = useState<string | null>(null);
 
   // List available audio output devices for the picker in Preferences — lets you route
   // Hushwave's sound to a specific device (e.g. a virtual audio cable) instead of just the
   // system default, which OBS can then capture directly and reliably.
   useEffect(() => {
-    const refresh = () => {
-      navigator.mediaDevices?.enumerateDevices?.().then((devices) => {
-        setOutputDevices(devices.filter((d) => d.kind === "audiooutput"));
-      }).catch(() => undefined);
+    const refresh = async () => {
+      if (!navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== "function") {
+        setOutputDevices([]);
+        setDeviceDiagnostic(
+          `Audio device listing isn't available in this window (isSecureContext: ${window.isSecureContext}). This is a WebView limitation, not a Hushwave setting — try updating WebView2.`
+        );
+        return;
+      }
+      try {
+        let devices = await navigator.mediaDevices.enumerateDevices();
+        let outputs = devices.filter((d) => d.kind === "audiooutput");
+        // Some WebView engines blank out device info entirely without a permission grant, even
+        // for outputs (which normally don't need one in a real browser). Try once to unlock it.
+        if (outputs.length === 0 || outputs.every((d) => !d.label && !d.deviceId)) {
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            stream.getTracks().forEach((t) => t.stop());
+            devices = await navigator.mediaDevices.enumerateDevices();
+            outputs = devices.filter((d) => d.kind === "audiooutput");
+          } catch {
+            // No input device, or permission denied — fall through with whatever we already have.
+          }
+        }
+        setOutputDevices(outputs);
+        setDeviceDiagnostic(outputs.length === 0 ? "The system reported zero audio output devices when asked — this looks like a WebView2/Windows issue outside Hushwave." : null);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setOutputDevices([]);
+        setDeviceDiagnostic(`Couldn't list audio devices: ${message}`);
+      }
     };
     refresh();
     navigator.mediaDevices?.addEventListener?.("devicechange", refresh);
@@ -529,9 +556,13 @@ export default function Home() {
                   ))}
                 </SelectContent>
               </Select>
-              <p className="mt-2 text-[11px] leading-4 text-white/35">
-                Route Hushwave's audio to a specific device — e.g. a virtual audio cable (like VB-Audio Virtual Cable, free) that OBS can capture directly via a plain Audio Output Capture source, instead of relying on OBS finding the right process.
-              </p>
+              {deviceDiagnostic ? (
+                <p className="mt-2 text-[11px] leading-4 text-amber-300/80">{deviceDiagnostic}</p>
+              ) : (
+                <p className="mt-2 text-[11px] leading-4 text-white/35">
+                  Route Hushwave's audio to a specific device — e.g. a virtual audio cable (like VB-Audio Virtual Cable, free) that OBS can capture directly via a plain Audio Output Capture source, instead of relying on OBS finding the right process.
+                </p>
+              )}
             </div>
             <div>
               <div className="mb-2 text-xs text-white/55">Default sleep timer</div>
