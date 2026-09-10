@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { generateAmbientTrack } from "@/lib/generateAmbient";
+import { generateAmbientTrack, generateAmbientTrackViaApi, SoundApiError } from "@/lib/generateAmbient";
+import { toast } from "sonner";
 import {
   Dialog,
   DialogContent,
@@ -60,6 +61,8 @@ const sounds: Sound[] = [
 const VOLUME_KEY = "hushwave:defaultVolume";
 const LOOP_KEY = "hushwave:defaultLoopMode";
 const SLEEP_KEY = "hushwave:defaultSleep";
+const API_KEY_KEY = "hushwave:elevenLabsApiKey";
+const GEN_MODE_KEY = "hushwave:generationMode";
 
 const prompts = ["rain on a skylight", "late-night train cabin", "warm analog room tone"];
 
@@ -75,6 +78,12 @@ export default function Home() {
     return stored ? Number(stored) : 68;
   });
   const [sleep, setSleep] = useState(() => localStorage.getItem(SLEEP_KEY) || "Off");
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem(API_KEY_KEY) || "");
+  const [generationMode, setGenerationMode] = useState<"offline" | "online">(
+    () => (localStorage.getItem(GEN_MODE_KEY) as "offline" | "online") || "offline"
+  );
+  const [customSounds, setCustomSounds] = useState<Sound[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [prompt, setPrompt] = useState("");
   const [generating, setGenerating] = useState(false);
   const [generatedSounds, setGeneratedSounds] = useState<Sound[]>([]);
@@ -111,6 +120,14 @@ export default function Home() {
     localStorage.setItem(SLEEP_KEY, sleep);
   }, [sleep]);
 
+  useEffect(() => {
+    localStorage.setItem(API_KEY_KEY, apiKey);
+  }, [apiKey]);
+
+  useEffect(() => {
+    localStorage.setItem(GEN_MODE_KEY, generationMode);
+  }, [generationMode]);
+
   // Sleep timer: stop playback after the chosen duration.
   useEffect(() => {
     if (sleep === "Off") return;
@@ -122,7 +139,7 @@ export default function Home() {
   }, [sleep, active]);
 
   // Generated tracks show up first, ahead of the built-in library.
-  const allSounds = useMemo(() => [...generatedSounds, ...sounds], [generatedSounds]);
+  const allSounds = useMemo(() => [...generatedSounds, ...customSounds, ...sounds], [generatedSounds, customSounds]);
 
   const filtered = useMemo(() => {
     const q = query.toLowerCase().trim();
@@ -171,20 +188,69 @@ export default function Home() {
     setGeneratedSounds([]);
   };
 
+  const clearCustomFiles = () => {
+    if (customSounds.some((s) => s.id === active.id)) setActive(sounds[0]);
+    customSounds.forEach((s) => {
+      if (s.source?.startsWith("blob:")) URL.revokeObjectURL(s.source);
+    });
+    setCustomSounds([]);
+  };
+
+  const handleFilesPicked = (fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    const palette = ["from-sky-400/60 to-blue-950/80", "from-rose-400/60 to-red-950/80", "from-teal-400/60 to-cyan-950/80", "from-amber-400/60 to-orange-950/80"];
+    const added: Sound[] = Array.from(fileList).map((file, i) => ({
+      id: `custom-${Date.now()}-${i}`,
+      title: file.name.replace(/\.[^/.]+$/, ""),
+      subtitle: "Your file · added this session",
+      tags: ["your files", "local"],
+      color: palette[i % palette.length],
+      duration: "local file",
+      source: URL.createObjectURL(file),
+    }));
+    setCustomSounds((prev) => [...added, ...prev]);
+    setActive(added[0]);
+    setPlaying(true);
+    toast.success(added.length > 1 ? `Added ${added.length} files to your library.` : `Added “${added[0].title}” to your library.`);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
   const generate = () => {
     const text = prompt.trim();
     if (!text) return;
+
+    if (generationMode === "online" && !apiKey.trim()) {
+      toast.error("Online generation is selected, but no ElevenLabs API key is set — add one in Preferences, or switch to the offline generator.");
+      return;
+    }
+
     setGenerating(true);
-    generateAmbientTrack(text)
-      .then((url) => {
-        const next: Sound = { id: `generated-${Date.now()}`, title: text.replace(/^./, (c) => c.toUpperCase()), subtitle: "Generated texture · instrumental · original", tags: ["generated", "original", "your prompt"], color: "from-lime-400/60 to-emerald-950/80", duration: "0:20 loop", source: url };
-        setGeneratedSounds((prev) => [next, ...prev]);
-        setActive(next);
-        setPlaying(true);
+
+    const addTrack = (source: string, subtitle: string) => {
+      const next: Sound = { id: `generated-${Date.now()}`, title: text.replace(/^./, (c) => c.toUpperCase()), subtitle, tags: ["generated", "original", "your prompt"], color: "from-lime-400/60 to-emerald-950/80", duration: "0:20 loop", source };
+      setGeneratedSounds((prev) => [next, ...prev]);
+      setActive(next);
+      setPlaying(true);
+    };
+
+    const task =
+      generationMode === "online"
+        ? generateAmbientTrackViaApi(text, apiKey.trim()).then(
+            (url) => addTrack(url, "Generated by ElevenLabs · from your prompt"),
+            (err: unknown) => {
+              const message = err instanceof SoundApiError ? err.message : "The ElevenLabs request failed.";
+              toast.error(`ElevenLabs generation failed — used the offline generator instead. (${message})`);
+              return generateAmbientTrack(text).then((url) => addTrack(url, "Generated texture · instrumental · original"));
+            }
+          )
+        : generateAmbientTrack(text).then((url) => addTrack(url, "Generated texture · instrumental · original"));
+
+    task
+      .catch(() => toast.error("Sound generation failed."))
+      .finally(() => {
+        setGenerating(false);
         setPrompt("");
-      })
-      .catch(() => undefined)
-      .finally(() => setGenerating(false));
+      });
   };
 
   return (
@@ -222,6 +288,32 @@ export default function Home() {
               </Select>
             </div>
             <div>
+              <div className="mb-2 text-xs text-white/55">Sound generation</div>
+              <Select value={generationMode} onValueChange={(v) => setGenerationMode(v as "offline" | "online")}>
+                <SelectTrigger className="w-full border-white/10 bg-black/20 text-sm"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="offline">Offline generator (on this device)</SelectItem>
+                  <SelectItem value="online">Online — ElevenLabs (your API key)</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+            <div>
+              <div className="mb-2 flex items-center justify-between text-xs text-white/55">
+                <span>ElevenLabs API key</span>
+                <a href="https://elevenlabs.io/app/settings/api-keys" target="_blank" rel="noreferrer" className="text-violet-200 hover:text-white">Get a key ↗</a>
+              </div>
+              <input
+                type="password"
+                value={apiKey}
+                onChange={(e) => setApiKey(e.target.value)}
+                placeholder="Only needed if 'Online' is selected above"
+                className="w-full rounded-xl border border-white/10 bg-black/20 px-3 py-2 text-sm outline-none placeholder:text-white/30 focus:border-violet-300/60"
+              />
+              <p className="mt-2 text-[11px] leading-4 text-white/35">
+                Stored only on this device. Calls to ElevenLabs use your own account and may incur cost on their end. If an online request fails, Hushwave falls back to the offline generator automatically.
+              </p>
+            </div>
+            <div>
               <div className="mb-2 text-xs text-white/55">Default sleep timer</div>
               <Select value={sleep} onValueChange={setSleep}>
                 <SelectTrigger className="w-full border-white/10 bg-black/20 text-sm"><SelectValue /></SelectTrigger>
@@ -238,6 +330,12 @@ export default function Home() {
                 <button onClick={clearGenerated} className="text-xs text-violet-200 hover:text-white">Clear</button>
               </div>
             )}
+            {customSounds.length > 0 && (
+              <div className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5">
+                <span className="text-xs text-white/55">Clear your added file{customSounds.length > 1 ? "s" : ""} ({customSounds.length})</span>
+                <button onClick={clearCustomFiles} className="text-xs text-violet-200 hover:text-white">Clear</button>
+              </div>
+            )}
           </div>
           <DialogFooter>
             <button onClick={() => setPrefsOpen(false)} className="rounded-xl bg-violet-300 px-4 py-2 text-sm font-semibold text-[#17131f] hover:bg-violet-200">Done</button>
@@ -250,7 +348,8 @@ export default function Home() {
           <div className="mb-8 max-w-2xl"><div className="mb-4 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.25em] text-violet-300"><Sparkles size={14} /> Sound, made quiet</div><h1 className="font-display text-5xl font-semibold leading-[0.95] tracking-[-0.05em] text-white sm:text-7xl">Find your<br /><span className="text-white/45">background.</span></h1><p className="mt-5 max-w-lg text-sm leading-6 text-white/55">Original ambient textures for focus, rest, and everything in between. Stream safely, search freely, and make a soundscape from a sentence.</p></div>
           <div className="mb-8 flex max-w-xl items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.045] px-4 py-3 shadow-2xl shadow-black/20 focus-within:border-violet-300/60 focus-within:bg-white/[0.07]"><Search size={18} className="text-white/35" /><input aria-label="Search ambient sounds" value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Search rain, focus, ocean, cozy…" className="min-w-0 flex-1 bg-transparent text-sm outline-none placeholder:text-white/30" />{query && <button onClick={() => setQuery("")} aria-label="Clear search"><X size={16} className="text-white/35 hover:text-white" /></button>}<kbd className="hidden rounded-md border border-white/10 px-2 py-1 text-[10px] text-white/30 sm:block">⌘ K</kbd></div>
 
-          <div className="mb-4 flex items-center justify-between"><h2 className="font-display text-xl font-medium">Sound library <span className="ml-2 text-sm font-normal text-white/30">{filtered.length}</span></h2><button className="flex items-center gap-1 text-xs text-white/40 hover:text-white">Newest <ChevronDown size={13} /></button></div>
+          <div className="mb-4 flex items-center justify-between"><h2 className="font-display text-xl font-medium">Sound library <span className="ml-2 text-sm font-normal text-white/30">{filtered.length}</span></h2><div className="flex items-center gap-3"><button onClick={() => fileInputRef.current?.click()} className="flex items-center gap-1 text-xs text-white/40 hover:text-white"><Plus size={13} /> Add your own files</button><button className="flex items-center gap-1 text-xs text-white/40 hover:text-white">Newest <ChevronDown size={13} /></button></div></div>
+          <input ref={fileInputRef} type="file" accept="audio/*" multiple onChange={(e) => handleFilesPicked(e.target.files)} className="hidden" />
           <div className="grid gap-3 sm:grid-cols-2">
             {filtered.map((sound) => <button key={sound.id} onClick={() => selectSound(sound)} className={`group flex items-center gap-4 rounded-2xl border p-3 text-left transition duration-200 hover:-translate-y-0.5 hover:border-white/25 ${active.id === sound.id ? "border-violet-300/70 bg-violet-300/[0.08]" : "border-white/10 bg-white/[0.035]"}`}><div className={`grid h-14 w-14 shrink-0 place-items-center rounded-xl bg-gradient-to-br ${sound.color} shadow-inner`}><AudioLines size={22} className="text-white/80" /></div><div className="min-w-0 flex-1"><div className="truncate text-sm font-medium text-white/90">{sound.title}</div><div className="mt-1 truncate text-xs text-white/40">{sound.subtitle}</div><div className="mt-2 flex gap-1.5">{sound.tags.slice(0, 2).map((tag) => <span key={tag} className="rounded-full bg-white/[0.07] px-2 py-0.5 text-[10px] text-white/40">{tag}</span>)}</div></div><div className="flex flex-col items-end gap-2 text-white/30"><span className="text-[10px]">{sound.duration}</span><span className={`grid h-7 w-7 place-items-center rounded-full transition ${active.id === sound.id ? "bg-violet-300 text-[#17131f]" : "bg-white/10 group-hover:bg-white/20"}`}>{active.id === sound.id && playing ? <Pause size={13} fill="currentColor" /> : <Play size={13} fill="currentColor" />}</span></div></button>)}
           </div>
