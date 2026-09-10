@@ -1,0 +1,15 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&family=Playfair+Display:wght@500;600&display=swap');
+@import "tailwindcss";
+@import "tw-animate-css";
+@custom-variant dark (&:is(.dark *));
+@theme inline { --font-sans: 'Manrope', sans-serif; --font-display: 'Playfair Display', serif; --font-mono: 'DM Mono', monospace; --color-background: #0b0c10; --color-foreground: #f3f0e8; --color-border: rgba(255,255,255,.1); --color-ring: #c4b5fd; }
+:root { font-family: 'Manrope', sans-serif; color: #f3f0e8; background: #0b0c10; font-synthesis: none; text-rendering: optimizeLegibility; }
+* { box-sizing: border-box; }
+html { background: #0b0c10; }
+body { margin: 0; min-width: 320px; background: #0b0c10; }
+button, input { font: inherit; }
+button { cursor: pointer; }
+button:active { transform: scale(.98); }
+.font-display { font-family: 'Playfair Display', serif; }
+@media (prefers-reduced-motion: no-preference) { button, input, .group { transition-timing-function: cubic-bezier(.23,1,.32,1); transition-duration: 180ms; } }
+input[type='range'] { accent-color: #c4b5fd; }
