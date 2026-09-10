@@ -53,21 +53,59 @@ export async function generateAmbientTrack(prompt: string): Promise<string> {
 
   if (kind === "pad") {
     const root = 55 * Math.pow(2, Math.floor(rng() * 3));
-    const degrees = [0, PENTATONIC[1 + Math.floor(rng() * 2)], PENTATONIC[3 + Math.floor(rng() * 2)]];
-    degrees.forEach((deg) => {
+    const degrees = [0, PENTATONIC[1 + Math.floor(rng() * 2)], PENTATONIC[3 + Math.floor(rng() * 2)], PENTATONIC[Math.floor(rng() * PENTATONIC.length)] + 12];
+    degrees.forEach((deg, i) => {
       const freq = root * Math.pow(2, deg / 12);
+      const startAt = rng() * 2; // stagger entrances so the chord blooms in rather than snapping on
       const osc = ctx.createOscillator();
-      osc.type = "sine";
+      osc.type = i % 2 === 0 ? "sine" : "triangle";
       osc.frequency.value = freq * (1 + (rng() - 0.5) * 0.01);
+
+      // Slow per-oscillator vibrato, each at a slightly different rate so the notes drift
+      // in and out of phase with each other instead of sitting there as one static drone.
+      const vibrato = ctx.createOscillator();
+      vibrato.frequency.value = 0.08 + rng() * 0.15;
+      const vibratoGain = ctx.createGain();
+      vibratoGain.gain.value = 2 + rng() * 3;
+      vibrato.connect(vibratoGain).connect(osc.detune);
+      vibrato.start(0);
+
       const filter = ctx.createBiquadFilter();
       filter.type = "lowpass";
       filter.frequency.value = 700 + rng() * 500;
+
+      // A slow filter sweep gives the pad movement over the loop instead of a flat tone.
+      const filterLfo = ctx.createOscillator();
+      filterLfo.frequency.value = 0.04 + rng() * 0.05;
+      const filterLfoGain = ctx.createGain();
+      filterLfoGain.gain.value = 180 + rng() * 120;
+      filterLfo.connect(filterLfoGain).connect(filter.frequency);
+      filterLfo.start(0);
+
       const gain = ctx.createGain();
-      gain.gain.value = 0.32 / degrees.length;
+      gain.gain.setValueAtTime(0, startAt);
+      gain.gain.linearRampToValueAtTime(0.3 / degrees.length, startAt + 2.5);
+
       osc.connect(filter).connect(gain).connect(master);
-      osc.start(0);
+      osc.start(startAt);
       osc.stop(DURATION);
     });
+
+    // A faint filtered-noise bed under the tones keeps it from sounding like plain digital
+    // sine waves — every real "pad" has some air/hiss under it.
+    const airBuffer = ctx.createBuffer(1, SAMPLE_RATE * DURATION, SAMPLE_RATE);
+    const airData = airBuffer.getChannelData(0);
+    for (let i = 0; i < airData.length; i++) airData[i] = rng() * 2 - 1;
+    const airSrc = ctx.createBufferSource();
+    airSrc.buffer = airBuffer;
+    const airFilter = ctx.createBiquadFilter();
+    airFilter.type = "bandpass";
+    airFilter.frequency.value = 2000 + rng() * 1500;
+    airFilter.Q.value = 0.5;
+    const airGain = ctx.createGain();
+    airGain.gain.value = 0.035;
+    airSrc.connect(airFilter).connect(airGain).connect(master);
+    airSrc.start(0);
   } else {
     const buffer = ctx.createBuffer(1, SAMPLE_RATE * DURATION, SAMPLE_RATE);
     const data = buffer.getChannelData(0);
