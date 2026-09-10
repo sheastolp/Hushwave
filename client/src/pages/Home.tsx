@@ -21,8 +21,6 @@ import {
   Clock3,
   Disc3,
   Headphones,
-  Layers3,
-  ListMusic,
   Loader2,
   Pause,
   Play,
@@ -30,6 +28,8 @@ import {
   Repeat,
   Search,
   Settings2,
+  SkipBack,
+  SkipForward,
   SlidersHorizontal,
   Sparkles,
   Volume2,
@@ -80,13 +80,21 @@ export default function Home() {
   const [prefsOpen, setPrefsOpen] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
 
-  // Keep the <audio> element's src in sync with whichever track is "active," even if it
-  // became active without going through selectSound (e.g. the initial default track).
+  // Single source of truth for actually driving the <audio> element: whenever the active
+  // track or the playing/paused intent changes, sync the real element to match. This is what
+  // makes selectSound/togglePlay/step/generate all "just work" without each one having to
+  // remember to call .play()/.pause() itself.
   useEffect(() => {
-    if (audioRef.current && active.source && audioRef.current.src !== new URL(active.source, window.location.href).href) {
-      audioRef.current.src = active.source;
+    const el = audioRef.current;
+    if (!el || !active.source) return;
+    const resolvedSrc = new URL(active.source, window.location.href).href;
+    if (el.src !== resolvedSrc) el.src = active.source;
+    if (playing) {
+      el.play().catch(() => setPlaying(false));
+    } else {
+      el.pause();
     }
-  }, [active]);
+  }, [active, playing]);
 
   // Apply volume to the actual <audio> element whenever it changes, and persist as the default.
   useEffect(() => {
@@ -107,7 +115,6 @@ export default function Home() {
     if (sleep === "Off") return;
     const minutes = sleep === "30 min" ? 30 : 60;
     const timer = window.setTimeout(() => {
-      audioRef.current?.pause();
       setPlaying(false);
     }, minutes * 60 * 1000);
     return () => window.clearTimeout(timer);
@@ -122,20 +129,12 @@ export default function Home() {
   const selectSound = (sound: Sound) => {
     setActive(sound);
     setPlaying(true);
-    if (sound.source && audioRef.current) {
-      audioRef.current.src = sound.source;
-      audioRef.current.play().catch(() => setPlaying(false));
-    }
   };
 
-  const togglePlay = () => {
-    if (active.source && audioRef.current) {
-      if (playing) audioRef.current.pause();
-      else audioRef.current.play().catch(() => undefined);
-    }
-    setPlaying((value) => !value);
-  };
+  const togglePlay = () => setPlaying((value) => !value);
 
+  // Moves to the next/previous track *within the current queue*. This is a plain track-skip
+  // control — it does not depend on, or change, loopMode.
   const step = (direction: 1 | -1) => {
     const list = filtered.length ? filtered : sounds;
     const currentIndex = list.findIndex((s) => s.id === active.id);
@@ -143,8 +142,17 @@ export default function Home() {
     selectSound(list[nextIndex]);
   };
 
+  // Explicit, mode-driven behavior when a track finishes — deliberately not using the native
+  // <audio loop> attribute, since relying on it here is what caused "Loop track" to sometimes
+  // behave like it was advancing through the whole library instead of just repeating itself.
   const handleEnded = () => {
-    if (loopMode === "playlist") {
+    if (loopMode === "track") {
+      const el = audioRef.current;
+      if (el) {
+        el.currentTime = 0;
+        el.play().catch(() => setPlaying(false));
+      }
+    } else if (loopMode === "playlist") {
       step(1);
     } else {
       setPlaying(false);
@@ -160,14 +168,14 @@ export default function Home() {
     if (!prompt.trim()) return;
     setGenerating(true);
     window.setTimeout(() => {
-      const next: Sound = { id: `generated-${Date.now()}`, title: prompt.trim().replace(/^./, (c) => c.toUpperCase()), subtitle: "Generated texture · instrumental · original", tags: ["generated", "original", "your prompt"], color: "from-lime-400/60 to-emerald-950/80", duration: "02:40", source: sounds[0].source };
+      const next: Sound = { id: `generated-${Date.now()}`, title: prompt.trim().replace(/^./, (c) => c.toUpperCase()), subtitle: "Generated texture · instrumental · original", tags: ["generated", "original", "your prompt"], color: "from-lime-400/60 to-emerald-950/80", duration: "0:30 loop", source: sounds[0].source };
       setGenerated(next); setActive(next); setPlaying(true); setGenerating(false); setPrompt("");
     }, 1400);
   };
 
   return (
     <div className="min-h-screen bg-[#0b0c10] text-[#f3f0e8] selection:bg-violet-400/30">
-      <audio ref={audioRef} loop={loopMode === "track"} onEnded={handleEnded} />
+      <audio ref={audioRef} onEnded={handleEnded} />
       <div className="pointer-events-none fixed inset-0 opacity-30 [background-image:radial-gradient(#fff_0.6px,transparent_0.6px)] [background-size:18px_18px]" />
       <header className="relative z-10 flex h-20 items-center justify-between border-b border-white/10 px-6 lg:px-10">
         <div className="flex items-center gap-3"><div className="grid h-9 w-9 place-items-center rounded-xl bg-violet-400 text-[#17131f]"><Waves size={20} strokeWidth={2.5} /></div><div><div className="font-display text-lg font-semibold tracking-tight">Hushwave</div><div className="text-[10px] uppercase tracking-[0.28em] text-white/40">ambient player</div></div></div>
@@ -237,7 +245,7 @@ export default function Home() {
           <div className="mt-10 overflow-hidden rounded-3xl border border-violet-300/20 bg-gradient-to-br from-violet-400/[0.14] via-white/[0.03] to-emerald-300/[0.06] p-6"><div className="flex items-start justify-between gap-4"><div><div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.2em] text-violet-200"><Sparkles size={14} /> Prompt studio</div><h2 className="font-display text-2xl">Make a soundscape</h2><p className="mt-2 max-w-md text-xs leading-5 text-white/45">Describe a mood, place, or texture. Hushwave creates a fresh original ambient layer for your session.</p></div><div className="hidden rounded-xl border border-emerald-200/20 bg-emerald-200/10 px-3 py-2 text-[10px] text-emerald-200 sm:block"><Check size={13} className="mr-1 inline" /> original by design</div></div><div className="mt-5 flex flex-col gap-3 sm:flex-row"><input value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={(e) => e.key === "Enter" && generate()} placeholder="e.g. moonlit greenhouse with soft rain" className="min-w-0 flex-1 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm outline-none placeholder:text-white/30 focus:border-violet-300/60" /><button onClick={generate} disabled={generating || !prompt.trim()} className="flex items-center justify-center gap-2 rounded-xl bg-violet-300 px-5 py-3 text-sm font-semibold text-[#17131f] transition hover:bg-violet-200 disabled:cursor-not-allowed disabled:opacity-50">{generating ? <><Loader2 size={15} className="animate-spin" /> Creating…</> : <><Sparkles size={15} /> Generate</>}</button></div><div className="mt-3 flex flex-wrap gap-2">{prompts.map((item) => <button key={item} onClick={() => setPrompt(item)} className="rounded-full border border-white/10 px-3 py-1.5 text-[11px] text-white/45 hover:border-white/25 hover:text-white/75">{item}</button>)}</div>{generated && <div className="mt-4 flex items-center gap-2 text-xs text-emerald-200"><Check size={14} /> Added “{generated.title}” to your library</div>}</div>
         </section>
 
-        <aside className="lg:pt-16"><div className="sticky top-8 overflow-hidden rounded-[28px] border border-white/10 bg-[#12141b]/90 shadow-2xl shadow-black/40 backdrop-blur-xl"><div className={`relative flex h-56 items-end bg-gradient-to-br ${active.color} p-6`}><div className="absolute inset-0 opacity-40 [background-image:radial-gradient(circle_at_20%_20%,white_0,transparent_32%),linear-gradient(120deg,transparent,rgba(255,255,255,.12))]" /><div className="relative"><div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-[0.25em] text-white/60"><Disc3 size={13} /> now playing</div><h2 className="font-display text-3xl font-medium tracking-tight">{active.title}</h2><p className="mt-1 text-xs text-white/55">{active.subtitle}</p></div><div className="absolute right-6 top-6 grid h-12 w-12 place-items-center rounded-2xl border border-white/20 bg-black/10 text-white/70"><Headphones size={20} /></div></div><div className="p-6"><div className="mb-2 flex items-center justify-between text-[10px] text-white/30"><span>00:42</span><span>{active.duration === "∞" ? "∞" : active.duration}</span></div><div className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full w-[34%] rounded-full bg-violet-300" /></div><div className="mt-6 flex items-center justify-center gap-5"><button onClick={() => step(-1)} className="text-white/40 hover:text-white" aria-label="Previous"><Layers3 size={18} /></button><button onClick={togglePlay} aria-label={playing ? "Pause" : "Play"} className="grid h-14 w-14 place-items-center rounded-full bg-white text-[#17131f] shadow-xl shadow-white/10 transition hover:scale-105">{playing ? <Pause size={22} fill="currentColor" /> : <Play size={22} fill="currentColor" className="ml-0.5" />}</button><button onClick={() => step(1)} className="text-white/40 hover:text-white" aria-label="Next"><ListMusic size={19} /></button></div><div className="mt-7 grid grid-cols-2 gap-2"><button onClick={() => setLoopMode(loopMode === "track" ? "playlist" : loopMode === "playlist" ? "off" : "track")} className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs transition ${loopMode !== "off" ? "border-violet-300/40 bg-violet-300/10 text-violet-200" : "border-white/10 text-white/45"}`}><Repeat size={14} /> {loopMode === "track" ? "Loop track" : loopMode === "playlist" ? "Loop playlist" : "Loop off"}</button><button onClick={() => setSleep(sleep === "Off" ? "30 min" : sleep === "30 min" ? "60 min" : "Off")} className="flex items-center justify-center gap-2 rounded-xl border border-white/10 px-3 py-2.5 text-xs text-white/45 transition hover:border-white/25 hover:text-white"><Clock3 size={14} /> Sleep {sleep}</button></div><div className="mt-7 flex items-center gap-3"><Volume2 size={16} className="text-white/35" /><input aria-label="Volume" type="range" min="0" max="100" value={volume} onChange={(e) => setVolume(Number(e.target.value))} className="h-1 flex-1 accent-violet-300" /><span className="w-8 text-right text-[11px] text-white/35">{volume}%</span></div><div className="mt-7 border-t border-white/10 pt-5"><div className="mb-3 flex items-center justify-between"><span className="flex items-center gap-2 text-xs text-white/55"><SlidersHorizontal size={14} /> Quick mix</span><button className="text-[11px] text-violet-200 hover:text-white">Reset</button></div><div className="space-y-3"><MixRow name="Room tone" value={38} color="bg-cyan-300" /><MixRow name="Soft rain" value={22} color="bg-violet-300" /><MixRow name="Low hum" value={16} color="bg-amber-200" /></div></div></div></div></aside>
+        <aside className="lg:pt-16"><div className="sticky top-8 overflow-hidden rounded-[28px] border border-white/10 bg-[#12141b]/90 shadow-2xl shadow-black/40 backdrop-blur-xl"><div className={`relative flex h-56 items-end bg-gradient-to-br ${active.color} p-6`}><div className="absolute inset-0 opacity-40 [background-image:radial-gradient(circle_at_20%_20%,white_0,transparent_32%),linear-gradient(120deg,transparent,rgba(255,255,255,.12))]" /><div className="relative"><div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-[0.25em] text-white/60"><Disc3 size={13} /> now playing</div><h2 className="font-display text-3xl font-medium tracking-tight">{active.title}</h2><p className="mt-1 text-xs text-white/55">{active.subtitle}</p></div><div className="absolute right-6 top-6 grid h-12 w-12 place-items-center rounded-2xl border border-white/20 bg-black/10 text-white/70"><Headphones size={20} /></div></div><div className="p-6"><div className="mb-2 flex items-center justify-between text-[10px] text-white/30"><span>00:42</span><span>{active.duration === "∞" ? "∞" : active.duration}</span></div><div className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full w-[34%] rounded-full bg-violet-300" /></div><div className="mt-6 flex items-center justify-center gap-5"><button onClick={() => step(-1)} className="text-white/40 hover:text-white" aria-label="Previous track"><SkipBack size={18} /></button><button onClick={togglePlay} aria-label={playing ? "Pause" : "Play"} className="grid h-14 w-14 place-items-center rounded-full bg-white text-[#17131f] shadow-xl shadow-white/10 transition hover:scale-105">{playing ? <Pause size={22} fill="currentColor" /> : <Play size={22} fill="currentColor" className="ml-0.5" />}</button><button onClick={() => step(1)} className="text-white/40 hover:text-white" aria-label="Next track"><SkipForward size={19} /></button></div><div className="mt-7 grid grid-cols-2 gap-2"><button onClick={() => setLoopMode(loopMode === "track" ? "playlist" : loopMode === "playlist" ? "off" : "track")} className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs transition ${loopMode !== "off" ? "border-violet-300/40 bg-violet-300/10 text-violet-200" : "border-white/10 text-white/45"}`}><Repeat size={14} /> {loopMode === "track" ? "Loop track" : loopMode === "playlist" ? "Loop playlist" : "Loop off"}</button><button onClick={() => setSleep(sleep === "Off" ? "30 min" : sleep === "30 min" ? "60 min" : "Off")} className="flex items-center justify-center gap-2 rounded-xl border border-white/10 px-3 py-2.5 text-xs text-white/45 transition hover:border-white/25 hover:text-white"><Clock3 size={14} /> Sleep {sleep}</button></div><div className="mt-7 flex items-center gap-3"><Volume2 size={16} className="text-white/35" /><input aria-label="Volume" type="range" min="0" max="100" value={volume} onChange={(e) => setVolume(Number(e.target.value))} className="h-1 flex-1 accent-violet-300" /><span className="w-8 text-right text-[11px] text-white/35">{volume}%</span></div><div className="mt-7 border-t border-white/10 pt-5"><div className="mb-3 flex items-center justify-between"><span className="flex items-center gap-2 text-xs text-white/55"><SlidersHorizontal size={14} /> Quick mix</span><button className="text-[11px] text-violet-200 hover:text-white">Reset</button></div><div className="space-y-3"><MixRow name="Room tone" value={38} color="bg-cyan-300" /><MixRow name="Soft rain" value={22} color="bg-violet-300" /><MixRow name="Low hum" value={16} color="bg-amber-200" /></div></div></div></div></aside>
       </main>
       <footer className="relative z-10 mx-auto flex max-w-[1440px] flex-col gap-3 border-t border-white/10 px-6 py-6 text-[11px] text-white/30 sm:flex-row sm:items-center sm:justify-between lg:px-10"><div>Hushwave is a calm space for original, DMCA-safe ambient audio.</div><div className="flex items-center gap-4"><span className="flex items-center gap-1.5"><Check size={12} className="text-emerald-300" /> no copyrighted tracks</span><span className="flex items-center gap-1.5"><Plus size={12} /> Windows-ready</span></div></footer>
     </div>
