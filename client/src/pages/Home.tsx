@@ -67,6 +67,10 @@ const GEN_MODE_KEY = "hushwave:generationMode";
 
 const prompts = ["rain on a skylight", "late-night train cabin", "warm analog room tone"];
 
+// Keep in sync with the version in package.json, src-tauri/tauri.conf.json, and
+// src-tauri/Cargo.toml — those are what actually drive the build; this is just for display.
+const APP_VERSION = "1.0.6";
+
 export default function Home() {
   const [query, setQuery] = useState("");
   const [active, setActive] = useState<Sound>(sounds[0]);
@@ -287,7 +291,7 @@ export default function Home() {
       <audio ref={audioRef} onEnded={handleEnded} />
       <div className="pointer-events-none fixed inset-0 opacity-30 [background-image:radial-gradient(#fff_0.6px,transparent_0.6px)] [background-size:18px_18px]" />
       <header className="relative z-10 flex h-20 items-center justify-between border-b border-white/10 px-6 lg:px-10">
-        <div className="flex items-center gap-3"><div className="grid h-9 w-9 place-items-center rounded-xl bg-violet-400 text-[#17131f]"><Waves size={20} strokeWidth={2.5} /></div><div><div className="font-display text-lg font-semibold tracking-tight">Hushwave</div><div className="text-[10px] uppercase tracking-[0.28em] text-white/40">ambient player</div></div></div>
+        <div className="flex items-center gap-3"><div className="grid h-9 w-9 place-items-center rounded-xl bg-violet-400 text-[#17131f]"><Waves size={20} strokeWidth={2.5} /></div><div><div className="font-display text-lg font-semibold tracking-tight">Hushwave</div><div className="text-[10px] uppercase tracking-[0.28em] text-white/40">ambient player · v{APP_VERSION}</div></div></div>
         <div className="hidden items-center gap-2 rounded-full border border-emerald-300/20 bg-emerald-300/10 px-3 py-1.5 text-xs text-emerald-200 md:flex"><span className="h-1.5 w-1.5 rounded-full bg-emerald-300 shadow-[0_0_12px_#86efac]" />Built-in library: original, DMCA-safe</div>
         <button onClick={() => setPrefsOpen(true)} className="flex items-center gap-2 rounded-lg border border-white/10 px-3 py-2 text-xs text-white/60 transition hover:border-white/25 hover:text-white"><Settings2 size={14} /> Preferences</button>
       </header>
