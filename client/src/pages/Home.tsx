@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { generateAmbientTrack } from "@/lib/generateAmbient";
 import {
   Dialog,
   DialogContent,
@@ -76,7 +77,7 @@ export default function Home() {
   const [sleep, setSleep] = useState(() => localStorage.getItem(SLEEP_KEY) || "Off");
   const [prompt, setPrompt] = useState("");
   const [generating, setGenerating] = useState(false);
-  const [generated, setGenerated] = useState<Sound | null>(null);
+  const [generatedSounds, setGeneratedSounds] = useState<Sound[]>([]);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
 
@@ -120,11 +121,14 @@ export default function Home() {
     return () => window.clearTimeout(timer);
   }, [sleep, active]);
 
+  // Generated tracks show up first, ahead of the built-in library.
+  const allSounds = useMemo(() => [...generatedSounds, ...sounds], [generatedSounds]);
+
   const filtered = useMemo(() => {
     const q = query.toLowerCase().trim();
-    if (!q) return sounds;
-    return sounds.filter((sound) => [sound.title, sound.subtitle, ...sound.tags].join(" ").toLowerCase().includes(q));
-  }, [query]);
+    if (!q) return allSounds;
+    return allSounds.filter((sound) => [sound.title, sound.subtitle, ...sound.tags].join(" ").toLowerCase().includes(q));
+  }, [query, allSounds]);
 
   const selectSound = (sound: Sound) => {
     setActive(sound);
@@ -136,7 +140,7 @@ export default function Home() {
   // Moves to the next/previous track *within the current queue*. This is a plain track-skip
   // control — it does not depend on, or change, loopMode.
   const step = (direction: 1 | -1) => {
-    const list = filtered.length ? filtered : sounds;
+    const list = filtered.length ? filtered : allSounds;
     const currentIndex = list.findIndex((s) => s.id === active.id);
     const nextIndex = (currentIndex + direction + list.length) % list.length;
     selectSound(list[nextIndex]);
@@ -160,17 +164,27 @@ export default function Home() {
   };
 
   const clearGenerated = () => {
-    if (generated && active.id === generated.id) setActive(sounds[0]);
-    setGenerated(null);
+    if (generatedSounds.some((s) => s.id === active.id)) setActive(sounds[0]);
+    generatedSounds.forEach((s) => {
+      if (s.source?.startsWith("blob:")) URL.revokeObjectURL(s.source);
+    });
+    setGeneratedSounds([]);
   };
 
   const generate = () => {
-    if (!prompt.trim()) return;
+    const text = prompt.trim();
+    if (!text) return;
     setGenerating(true);
-    window.setTimeout(() => {
-      const next: Sound = { id: `generated-${Date.now()}`, title: prompt.trim().replace(/^./, (c) => c.toUpperCase()), subtitle: "Generated texture · instrumental · original", tags: ["generated", "original", "your prompt"], color: "from-lime-400/60 to-emerald-950/80", duration: "0:30 loop", source: sounds[0].source };
-      setGenerated(next); setActive(next); setPlaying(true); setGenerating(false); setPrompt("");
-    }, 1400);
+    generateAmbientTrack(text)
+      .then((url) => {
+        const next: Sound = { id: `generated-${Date.now()}`, title: text.replace(/^./, (c) => c.toUpperCase()), subtitle: "Generated texture · instrumental · original", tags: ["generated", "original", "your prompt"], color: "from-lime-400/60 to-emerald-950/80", duration: "0:20 loop", source: url };
+        setGeneratedSounds((prev) => [next, ...prev]);
+        setActive(next);
+        setPlaying(true);
+        setPrompt("");
+      })
+      .catch(() => undefined)
+      .finally(() => setGenerating(false));
   };
 
   return (
@@ -218,9 +232,9 @@ export default function Home() {
                 </SelectContent>
               </Select>
             </div>
-            {generated && (
+            {generatedSounds.length > 0 && (
               <div className="flex items-center justify-between rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5">
-                <span className="text-xs text-white/55">Clear your generated sound</span>
+                <span className="text-xs text-white/55">Clear your generated sound{generatedSounds.length > 1 ? "s" : ""} ({generatedSounds.length})</span>
                 <button onClick={clearGenerated} className="text-xs text-violet-200 hover:text-white">Clear</button>
               </div>
             )}
@@ -242,7 +256,7 @@ export default function Home() {
           </div>
           {filtered.length === 0 && <div className="rounded-2xl border border-dashed border-white/15 py-12 text-center text-sm text-white/40">No sounds match “{query}”. Try “rain”, “focus”, or “sleep”.</div>}
 
-          <div className="mt-10 overflow-hidden rounded-3xl border border-violet-300/20 bg-gradient-to-br from-violet-400/[0.14] via-white/[0.03] to-emerald-300/[0.06] p-6"><div className="flex items-start justify-between gap-4"><div><div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.2em] text-violet-200"><Sparkles size={14} /> Prompt studio</div><h2 className="font-display text-2xl">Make a soundscape</h2><p className="mt-2 max-w-md text-xs leading-5 text-white/45">Describe a mood, place, or texture. Hushwave creates a fresh original ambient layer for your session.</p></div><div className="hidden rounded-xl border border-emerald-200/20 bg-emerald-200/10 px-3 py-2 text-[10px] text-emerald-200 sm:block"><Check size={13} className="mr-1 inline" /> original by design</div></div><div className="mt-5 flex flex-col gap-3 sm:flex-row"><input value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={(e) => e.key === "Enter" && generate()} placeholder="e.g. moonlit greenhouse with soft rain" className="min-w-0 flex-1 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm outline-none placeholder:text-white/30 focus:border-violet-300/60" /><button onClick={generate} disabled={generating || !prompt.trim()} className="flex items-center justify-center gap-2 rounded-xl bg-violet-300 px-5 py-3 text-sm font-semibold text-[#17131f] transition hover:bg-violet-200 disabled:cursor-not-allowed disabled:opacity-50">{generating ? <><Loader2 size={15} className="animate-spin" /> Creating…</> : <><Sparkles size={15} /> Generate</>}</button></div><div className="mt-3 flex flex-wrap gap-2">{prompts.map((item) => <button key={item} onClick={() => setPrompt(item)} className="rounded-full border border-white/10 px-3 py-1.5 text-[11px] text-white/45 hover:border-white/25 hover:text-white/75">{item}</button>)}</div>{generated && <div className="mt-4 flex items-center gap-2 text-xs text-emerald-200"><Check size={14} /> Added “{generated.title}” to your library</div>}</div>
+          <div className="mt-10 overflow-hidden rounded-3xl border border-violet-300/20 bg-gradient-to-br from-violet-400/[0.14] via-white/[0.03] to-emerald-300/[0.06] p-6"><div className="flex items-start justify-between gap-4"><div><div className="mb-2 flex items-center gap-2 text-xs font-medium uppercase tracking-[0.2em] text-violet-200"><Sparkles size={14} /> Prompt studio</div><h2 className="font-display text-2xl">Make a soundscape</h2><p className="mt-2 max-w-md text-xs leading-5 text-white/45">Describe a mood, place, or texture. Hushwave creates a fresh original ambient layer for your session.</p></div><div className="hidden rounded-xl border border-emerald-200/20 bg-emerald-200/10 px-3 py-2 text-[10px] text-emerald-200 sm:block"><Check size={13} className="mr-1 inline" /> original by design</div></div><div className="mt-5 flex flex-col gap-3 sm:flex-row"><input value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={(e) => e.key === "Enter" && generate()} placeholder="e.g. moonlit greenhouse with soft rain" className="min-w-0 flex-1 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm outline-none placeholder:text-white/30 focus:border-violet-300/60" /><button onClick={generate} disabled={generating || !prompt.trim()} className="flex items-center justify-center gap-2 rounded-xl bg-violet-300 px-5 py-3 text-sm font-semibold text-[#17131f] transition hover:bg-violet-200 disabled:cursor-not-allowed disabled:opacity-50">{generating ? <><Loader2 size={15} className="animate-spin" /> Creating…</> : <><Sparkles size={15} /> Generate</>}</button></div><div className="mt-3 flex flex-wrap gap-2">{prompts.map((item) => <button key={item} onClick={() => setPrompt(item)} className="rounded-full border border-white/10 px-3 py-1.5 text-[11px] text-white/45 hover:border-white/25 hover:text-white/75">{item}</button>)}</div>{generatedSounds[0] && <div className="mt-4 flex items-center gap-2 text-xs text-emerald-200"><Check size={14} /> Added “{generatedSounds[0].title}” to your library</div>}</div>
         </section>
 
         <aside className="lg:pt-16"><div className="sticky top-8 overflow-hidden rounded-[28px] border border-white/10 bg-[#12141b]/90 shadow-2xl shadow-black/40 backdrop-blur-xl"><div className={`relative flex h-56 items-end bg-gradient-to-br ${active.color} p-6`}><div className="absolute inset-0 opacity-40 [background-image:radial-gradient(circle_at_20%_20%,white_0,transparent_32%),linear-gradient(120deg,transparent,rgba(255,255,255,.12))]" /><div className="relative"><div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-[0.25em] text-white/60"><Disc3 size={13} /> now playing</div><h2 className="font-display text-3xl font-medium tracking-tight">{active.title}</h2><p className="mt-1 text-xs text-white/55">{active.subtitle}</p></div><div className="absolute right-6 top-6 grid h-12 w-12 place-items-center rounded-2xl border border-white/20 bg-black/10 text-white/70"><Headphones size={20} /></div></div><div className="p-6"><div className="mb-2 flex items-center justify-between text-[10px] text-white/30"><span>00:42</span><span>{active.duration === "∞" ? "∞" : active.duration}</span></div><div className="h-1.5 overflow-hidden rounded-full bg-white/10"><div className="h-full w-[34%] rounded-full bg-violet-300" /></div><div className="mt-6 flex items-center justify-center gap-5"><button onClick={() => step(-1)} className="text-white/40 hover:text-white" aria-label="Previous track"><SkipBack size={18} /></button><button onClick={togglePlay} aria-label={playing ? "Pause" : "Play"} className="grid h-14 w-14 place-items-center rounded-full bg-white text-[#17131f] shadow-xl shadow-white/10 transition hover:scale-105">{playing ? <Pause size={22} fill="currentColor" /> : <Play size={22} fill="currentColor" className="ml-0.5" />}</button><button onClick={() => step(1)} className="text-white/40 hover:text-white" aria-label="Next track"><SkipForward size={19} /></button></div><div className="mt-7 grid grid-cols-2 gap-2"><button onClick={() => setLoopMode(loopMode === "track" ? "playlist" : loopMode === "playlist" ? "off" : "track")} className={`flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs transition ${loopMode !== "off" ? "border-violet-300/40 bg-violet-300/10 text-violet-200" : "border-white/10 text-white/45"}`}><Repeat size={14} /> {loopMode === "track" ? "Loop track" : loopMode === "playlist" ? "Loop playlist" : "Loop off"}</button><button onClick={() => setSleep(sleep === "Off" ? "30 min" : sleep === "30 min" ? "60 min" : "Off")} className="flex items-center justify-center gap-2 rounded-xl border border-white/10 px-3 py-2.5 text-xs text-white/45 transition hover:border-white/25 hover:text-white"><Clock3 size={14} /> Sleep {sleep}</button></div><div className="mt-7 flex items-center gap-3"><Volume2 size={16} className="text-white/35" /><input aria-label="Volume" type="range" min="0" max="100" value={volume} onChange={(e) => setVolume(Number(e.target.value))} className="h-1 flex-1 accent-violet-300" /><span className="w-8 text-right text-[11px] text-white/35">{volume}%</span></div><div className="mt-7 border-t border-white/10 pt-5"><div className="mb-3 flex items-center justify-between"><span className="flex items-center gap-2 text-xs text-white/55"><SlidersHorizontal size={14} /> Quick mix</span><button className="text-[11px] text-violet-200 hover:text-white">Reset</button></div><div className="space-y-3"><MixRow name="Room tone" value={38} color="bg-cyan-300" /><MixRow name="Soft rain" value={22} color="bg-violet-300" /><MixRow name="Low hum" value={16} color="bg-amber-200" /></div></div></div></div></aside>
