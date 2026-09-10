@@ -49,6 +49,26 @@ type Sound = {
   source?: string;
 };
 
+// Turns a MediaError code into something a user can actually act on, and always surfaces it —
+// audio elements fail silently by default, which made it impossible to tell "nothing is wrong,
+// it's just quiet" apart from "the file 404'd" or "the format isn't supported."
+function reportAudioError(el: HTMLAudioElement, label: string) {
+  const err = el.error;
+  if (!err) return;
+  const reason =
+    err.code === MediaError.MEDIA_ERR_ABORTED
+      ? "playback was aborted"
+      : err.code === MediaError.MEDIA_ERR_NETWORK
+      ? "a network error while loading the audio"
+      : err.code === MediaError.MEDIA_ERR_DECODE
+      ? "the audio file is corrupt or couldn't be decoded"
+      : err.code === MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED
+      ? "the audio file couldn't be found or its format isn't supported"
+      : "an unknown audio error";
+  toast.error(`Audio error on “${label}”: ${reason}.`);
+  console.error(`Hushwave audio element error on "${label}":`, err);
+}
+
 const sounds: Sound[] = [
   { id: "drift", title: "Hushwave Drift", subtitle: "Warm pads · soft tape · 58 BPM", tags: ["sleep", "focus", "original"], color: "from-violet-500/60 to-indigo-900/70", duration: "0:30 loop", source: "/audio/drift.wav" },
   { id: "rain", title: "Window Rain", subtitle: "Steady rainfall · no thunder", tags: ["rain", "sleep", "nature"], color: "from-cyan-500/60 to-slate-900/80", duration: "∞", source: "/audio/rain.wav" },
@@ -66,6 +86,7 @@ const FREESOUND_KEY_KEY = "hushwave:freesoundApiKey";
 const GEN_MODE_KEY = "hushwave:generationMode";
 const HIDDEN_BUILTIN_KEY = "hushwave:hiddenBuiltInIds";
 const MIX_KEY = "hushwave:quickMix";
+const OUTPUT_DEVICE_KEY = "hushwave:outputDeviceId";
 
 type MixSlot = { soundId: string; volume: number };
 const EMPTY_MIX: MixSlot[] = [
@@ -78,7 +99,7 @@ const prompts = ["rain on a skylight", "late-night train cabin", "warm analog ro
 
 // Keep in sync with the version in package.json, src-tauri/tauri.conf.json, and
 // src-tauri/Cargo.toml — those are what actually drive the build; this is just for display.
-const APP_VERSION = "1.0.7";
+const APP_VERSION = "1.0.9";
 
 export default function Home() {
   const [query, setQuery] = useState("");
@@ -120,6 +141,41 @@ export default function Home() {
   const [generatedSounds, setGeneratedSounds] = useState<Sound[]>([]);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const [outputDevices, setOutputDevices] = useState<MediaDeviceInfo[]>([]);
+  const [outputDeviceId, setOutputDeviceId] = useState(() => localStorage.getItem(OUTPUT_DEVICE_KEY) || "");
+
+  // List available audio output devices for the picker in Preferences — lets you route
+  // Hushwave's sound to a specific device (e.g. a virtual audio cable) instead of just the
+  // system default, which OBS can then capture directly and reliably.
+  useEffect(() => {
+    const refresh = () => {
+      navigator.mediaDevices?.enumerateDevices?.().then((devices) => {
+        setOutputDevices(devices.filter((d) => d.kind === "audiooutput"));
+      }).catch(() => undefined);
+    };
+    refresh();
+    navigator.mediaDevices?.addEventListener?.("devicechange", refresh);
+    return () => navigator.mediaDevices?.removeEventListener?.("devicechange", refresh);
+  }, []);
+
+  useEffect(() => {
+    localStorage.setItem(OUTPUT_DEVICE_KEY, outputDeviceId);
+  }, [outputDeviceId]);
+
+  // Applies the chosen output device to every audio element Hushwave uses. setSinkId isn't in
+  // every TS lib version's DOM types yet, hence the local casts.
+  useEffect(() => {
+    const elements = [audioRef.current, ...mixAudioRefs.current].filter((el): el is HTMLAudioElement => !!el);
+    for (const el of elements) {
+      const withSink = el as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> };
+      if (typeof withSink.setSinkId !== "function") continue;
+      withSink.setSinkId(outputDeviceId || "default").catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        toast.error(`Couldn't switch audio output device: ${message}`);
+        console.error("Hushwave setSinkId error:", err);
+      });
+    }
+  }, [outputDeviceId, active]);
 
   // Single source of truth for actually driving the <audio> element: whenever the active
   // track or the playing/paused intent changes, sync the real element to match. This is what
@@ -131,7 +187,12 @@ export default function Home() {
     const resolvedSrc = new URL(active.source, window.location.href).href;
     if (el.src !== resolvedSrc) el.src = active.source;
     if (playing) {
-      el.play().catch(() => setPlaying(false));
+      el.play().catch((err: unknown) => {
+        setPlaying(false);
+        const message = err instanceof Error ? err.message : String(err);
+        toast.error(`Couldn't play “${active.title}”: ${message}`);
+        console.error("Hushwave playback error:", err);
+      });
     } else {
       el.pause();
     }
@@ -188,7 +249,11 @@ export default function Home() {
       if (el.src !== resolvedSrc) el.src = sound.source;
       el.loop = true;
       el.volume = slot.volume / 100;
-      el.play().catch(() => undefined);
+      el.play().catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        toast.error(`Quick mix couldn't play “${sound.title}”: ${message}`);
+        console.error("Hushwave quick-mix playback error:", err);
+      });
     });
   }, [mixSlots, generatedSounds, customSounds]);
 
@@ -239,7 +304,12 @@ export default function Home() {
       const el = audioRef.current;
       if (el) {
         el.currentTime = 0;
-        el.play().catch(() => setPlaying(false));
+        el.play().catch((err: unknown) => {
+          setPlaying(false);
+          const message = err instanceof Error ? err.message : String(err);
+          toast.error(`Couldn't loop “${active.title}”: ${message}`);
+          console.error("Hushwave loop-restart error:", err);
+        });
       }
     } else if (loopMode === "playlist") {
       step(1);
@@ -370,9 +440,9 @@ export default function Home() {
 
   return (
     <div className="min-h-screen bg-[#0b0c10] text-[#f3f0e8] selection:bg-violet-400/30">
-      <audio ref={audioRef} onEnded={handleEnded} />
+      <audio ref={audioRef} onEnded={handleEnded} onError={(e) => reportAudioError(e.currentTarget, active.title)} />
       {mixSlots.map((_, i) => (
-        <audio key={i} ref={(el) => { mixAudioRefs.current[i] = el; }} />
+        <audio key={i} ref={(el) => { mixAudioRefs.current[i] = el; }} onError={(e) => reportAudioError(e.currentTarget, "a Quick mix layer")} />
       ))}
       <div className="pointer-events-none fixed inset-0 opacity-30 [background-image:radial-gradient(#fff_0.6px,transparent_0.6px)] [background-size:18px_18px]" />
       <header className="relative z-10 flex h-20 items-center justify-between border-b border-white/10 px-6 lg:px-10">
@@ -446,6 +516,21 @@ export default function Home() {
               />
               <p className="mt-2 text-[11px] leading-4 text-white/35">
                 Stored only on this device. Calls to ElevenLabs use your own account and may incur cost on their end. If an online request fails, Hushwave falls back to the offline generator automatically.
+              </p>
+            </div>
+            <div>
+              <div className="mb-2 text-xs text-white/55">Audio output device</div>
+              <Select value={outputDeviceId || "__default__"} onValueChange={(v) => setOutputDeviceId(v === "__default__" ? "" : v)}>
+                <SelectTrigger className="w-full border-white/10 bg-black/20 text-sm"><SelectValue /></SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="__default__">System default</SelectItem>
+                  {outputDevices.map((d) => (
+                    <SelectItem key={d.deviceId} value={d.deviceId}>{d.label || `Output ${d.deviceId.slice(0, 8)}`}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="mt-2 text-[11px] leading-4 text-white/35">
+                Route Hushwave's audio to a specific device — e.g. a virtual audio cable (like VB-Audio Virtual Cable, free) that OBS can capture directly via a plain Audio Output Capture source, instead of relying on OBS finding the right process.
               </p>
             </div>
             <div>
