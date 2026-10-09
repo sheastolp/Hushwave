@@ -242,26 +242,95 @@ function onePole(fc: number, sr: number) {
   return 1 - Math.exp((-2 * Math.PI * fc) / sr);
 }
 
+// Samples a curve made by wander() at time t (seconds).
+function curveAt(e: Env, curve: Float32Array, t: number): number {
+  return curve[Math.max(0, Math.min(curve.length - 1, Math.floor((t / e.dur) * (curve.length - 1))))];
+}
+
+// Time until the next event of a random (Poisson) process — real drops, bubbles and crackles
+// arrive at irregular intervals, never on an even grid.
+function nextGap(rng: Rng, rate: number): number {
+  return -Math.log(1 - rng()) / Math.max(1e-3, rate);
+}
+
+// Two-pole resonator, normalised to roughly unity gain at its peak. Ringing a noise impulse
+// through it gives the pitched "tock" of wood snapping or a drop hitting a surface.
+function resonator(freq: number, q: number, sr: number): (x: number) => number {
+  const w = (2 * Math.PI * Math.min(freq, sr * 0.45)) / sr;
+  const r = Math.exp(-w / (2 * q));
+  const a1 = 2 * r * Math.cos(w);
+  const a2 = r * r;
+  const g = (1 - r) * 2 * Math.sin(w);
+  let y1 = 0;
+  let y2 = 0;
+  return (x) => {
+    const y = g * x + a1 * y1 - a2 * y2;
+    y2 = y1;
+    y1 = y;
+    return y;
+  };
+}
+
+// A short noise burst rung through a resonator: crackles, snaps, and the impact of a drop.
+// The level is compensated for the resonator's bandwidth, so `amp` means roughly the same
+// loudness whether the tick is a bright, wide snap or a narrow, ringing one.
+function tick(e: Env, ev: Events, start: number, p: number, freq: number, q: number, amp: number, burst = 0.0006) {
+  const ring = q / (Math.PI * freq);
+  const n = Math.ceil(e.sr * (burst * 5 + ring * 6));
+  const res = resonator(freq, q, e.sr);
+  const bt = burst * e.sr;
+  const level = amp * Math.sqrt(e.sr / 2 / Math.min(e.sr / 2, freq / q));
+  ev.add(start, n, p, (i) => res((e.rng() * 2 - 1) * Math.exp(-i / bt)) * level);
+}
+
+// One gas bubble ringing in water (van den Doel's model): it rings at its Minnaert frequency,
+// decays faster the smaller it is, and its pitch glides upward as it nears the surface — that
+// rising "bloop" is what makes synthesized water read as wet instead of as beeps.
+function bubble(e: Env, ev: Events, start: number, p: number, f0: number, amp: number, rise: number) {
+  const d = 0.043 * f0 + 0.0014 * Math.pow(f0, 1.5);
+  const n = Math.min(Math.ceil((e.sr * 5) / d), Math.floor(e.sr * 0.25));
+  const sigma = rise * d;
+  const attack = e.sr * 0.0005;
+  let phase = 0;
+  ev.add(start, n, p, (i) => {
+    const t = i / e.sr;
+    phase += (2 * Math.PI * f0 * (1 + sigma * t)) / e.sr;
+    return Math.sin(phase) * Math.exp(-d * t) * Math.min(1, i / attack) * amp;
+  });
+}
+
 // ── Layers ──────────────────────────────────────────────────────────────────────────────────
 
 function layerRain(e: Env) {
   const k = e.intensity;
+  // Rain comes in sheets: one shared gust curve drives both the hiss and how many drops fall.
+  const gust = wander(e.rng, e.dur / 4, 0.65, 1.2);
   const g = gain(e, 0);
-  automate(e, g.gain, wander(e.rng, e.dur / 6, 0.32 * k, 0.45 * k));
+  automate(e, g.gain, gust.map((v) => v * 0.3 * k));
   noise(e, "pink").connect(filter(e, "highpass", 450 * e.tone)).connect(filter(e, "lowpass", 6500 * e.tone)).connect(g).connect(e.bus);
   noise(e, "white").connect(filter(e, "highpass", 4500)).connect(gain(e, 0.025 * k)).connect(e.bus);
 
   const ev = new Events(e);
-  const drops = Math.round(e.dur * 75 * k);
-  for (let d = 0; d < drops; d++) {
-    const f = (2200 + e.rng() * 4800) * e.tone;
-    const n = Math.floor(e.sr * (0.003 + e.rng() * 0.008));
-    const amp = (0.04 + e.rng() * 0.1) * (e.rng() < 0.08 ? 2.2 : 1);
-    const w = (2 * Math.PI * f) / e.sr;
-    const tau = n / 4;
-    ev.add(e.rng() * e.dur, n, e.rng() * 2 - 1, (i) => Math.sin(w * i) * Math.exp(-i / tau) * amp);
+  const rate = 110 * k;
+  for (let t = nextGap(e.rng, rate); t < e.dur; t += nextGap(e.rng, rate * curveAt(e, gust, t))) {
+    const p = e.rng() * 2 - 1;
+    // Most drops are small and far off; only a few land close enough to hear clearly.
+    const near = Math.pow(e.rng(), 3);
+    const amp = 0.018 + near * 0.18;
+    // The impact — a broadband tick coloured by whatever it lands on (leaves, roof, puddle).
+    tick(e, ev, t, p, (1500 + e.rng() * 5500) * e.tone, 1 + e.rng() * 2.5, amp, 0.0002 + e.rng() * 0.0005);
+    // Drops landing in standing water trap a bubble that rings with a short rising "plink".
+    if (e.rng() < 0.3) bubble(e, ev, t + 0.001 + e.rng() * 0.003, p, (1100 + e.rng() * 3200) * e.tone, amp * 0.35, 0.3 + e.rng());
   }
-  ev.source().connect(gain(e, 0.55 * k)).connect(e.bus);
+  // Heavier drips from eaves and branches: slower, lower, and closer.
+  const drips = Math.round(e.dur * 0.8 * k);
+  for (let d = 0; d < drips; d++) {
+    const t = e.rng() * e.dur;
+    const p = (e.rng() - 0.5) * 1.4;
+    tick(e, ev, t, p, (900 + e.rng() * 1800) * e.tone, 2 + e.rng() * 3, 0.045 + e.rng() * 0.035, 0.0008);
+    if (e.rng() < 0.6) bubble(e, ev, t + 0.002, p, (500 + e.rng() * 900) * e.tone, 0.08 + e.rng() * 0.06, 0.4 + e.rng() * 0.8);
+  }
+  ev.source().connect(filter(e, "highpass", 250)).connect(gain(e, 0.75 * k)).connect(e.bus);
 }
 
 function layerThunder(e: Env) {
@@ -311,25 +380,67 @@ function layerWind(e: Env) {
 
 function layerFire(e: Env) {
   const k = e.intensity;
+  // How lively the fire is right now. Roar, flicker, hiss and crackle density all follow it, so
+  // the fire flares up and settles as one thing instead of each part wandering on its own.
+  const heat = wander(e.rng, e.dur / 5, 0.55, 1.15, 8192);
+
+  // Roar: the low turbulent rumble of burning gas, with the fast irregular flutter of flames.
+  const flutter = wander(e.rng, e.dur * 7, 0.45, 1, 8192);
   const roar = gain(e, 0);
-  automate(e, roar.gain, wander(e.rng, e.dur / 2, 0.2 * k, 0.38 * k));
-  noise(e, "brown").connect(filter(e, "lowpass", 380 * e.tone)).connect(roar).connect(e.bus);
+  automate(e, roar.gain, heat.map((h, i) => 0.3 * k * h * flutter[i]));
+  noise(e, "brown").connect(filter(e, "lowpass", 320 * e.tone)).connect(roar).connect(e.bus);
+
+  // Lapping: flames licking the logs — a mid band of noise that breathes a few times a second.
+  const lick = wander(e.rng, e.dur * 3, 0, 1, 8192);
+  const lap = gain(e, 0);
+  automate(e, lap.gain, heat.map((h, i) => 0.09 * k * h * lick[i] * lick[i]));
+  const lapBand = filter(e, "bandpass", 400, 0.9);
+  automate(e, lapBand.frequency, wander(e.rng, e.dur * 2, 220 * e.tone, 700 * e.tone));
+  noise(e, "pink").connect(lapBand).connect(lap).connect(e.bus);
+
+  // Hiss: sap and gas escaping from the wood — silent most of the time, with occasional swells.
+  const hiss = gain(e, 0);
+  automate(e, hiss.gain, wander(e.rng, e.dur / 2.5, 0, 1, 2048).map((v) => 0.06 * k * Math.pow(v, 4)));
+  const hissBand = filter(e, "bandpass", 3500, 1.4);
+  automate(e, hissBand.frequency, wander(e.rng, e.dur / 3, 2500 * e.tone, 6000 * e.tone));
+  noise(e, "white").connect(hissBand).connect(hiss).connect(e.bus);
 
   const ev = new Events(e);
-  const clusters = Math.round(e.dur * 9 * k);
-  for (let c = 0; c < clusters; c++) {
-    let at = e.rng() * e.dur;
-    const p = (e.rng() - 0.5) * 1.2;
-    const clicks = 1 + Math.floor(e.rng() * 4);
+  // Crackles come in clumps: a burst of snaps as a pocket of moisture flashes to steam, then a
+  // lull. Their rate rises steeply with heat.
+  const rate = 6 * k;
+  for (let t = nextGap(e.rng, rate); t < e.dur; t += nextGap(e.rng, rate * Math.pow(curveAt(e, heat, t), 2.5))) {
+    const p = (e.rng() - 0.5) * 0.9;
+    if (e.rng() < 0.04) {
+      // A pop: a big pocket bursting, ringing lower, with a shower of sparks after it.
+      tick(e, ev, t, p, (350 + e.rng() * 800) * e.tone, 6 + e.rng() * 10, 0.35 + e.rng() * 0.25, 0.0015);
+      const sparks = 3 + Math.floor(e.rng() * 6);
+      for (let s = 0; s < sparks; s++) {
+        tick(e, ev, t + 0.01 + e.rng() * 0.18, p + (e.rng() - 0.5) * 0.3, (3000 + e.rng() * 5000) * e.tone, 2 + e.rng() * 3, 0.08 + e.rng() * 0.15, 0.0002);
+      }
+      continue;
+    }
+    const clicks = 1 + Math.floor(Math.pow(e.rng(), 2) * 10);
+    let amp = 0.15 + Math.pow(e.rng(), 2) * 0.7;
+    let tt = t;
     for (let j = 0; j < clicks; j++) {
-      const pop = e.rng() < 0.05;
-      const tau = e.sr * (pop ? 0.006 : 0.0004 + e.rng() * 0.0012);
-      const amp = pop ? 0.6 : 0.15 + e.rng() * 0.45;
-      ev.add(at, Math.ceil(tau * 6), p, (i) => (e.rng() * 2 - 1) * Math.exp(-i / tau) * amp);
-      at += 0.004 + e.rng() * 0.04;
+      tick(e, ev, tt, p + (e.rng() - 0.5) * 0.1, (1200 + e.rng() * 5500) * e.tone, 2 + e.rng() * 6, amp * (0.6 + e.rng() * 0.4), 0.0002 + e.rng() * 0.0008);
+      tt += 0.002 + e.rng() * 0.03;
+      amp *= 0.8;
     }
   }
-  ev.source().connect(filter(e, "highpass", 900)).connect(filter(e, "lowpass", 7000 * e.tone)).connect(gain(e, 0.5 * k)).connect(e.bus);
+  // Now and then a log shifts: a soft thud followed by embers crumbling.
+  const settles = Math.max(1, Math.round(e.dur / 25));
+  for (let s = 0; s < settles; s++) {
+    const t = (s + 0.2 + e.rng() * 0.6) * ((e.dur - LOOP_XFADE) / settles);
+    const p = (e.rng() - 0.5) * 0.6;
+    tick(e, ev, t, p, 80 + e.rng() * 70, 1.5, 0.3 + e.rng() * 0.15, 0.012);
+    const crumbs = 15 + Math.floor(e.rng() * 25);
+    for (let c = 0; c < crumbs; c++) {
+      tick(e, ev, t + 0.02 + Math.pow(e.rng(), 1.5) * 0.6, p + (e.rng() - 0.5) * 0.3, (2000 + e.rng() * 6000) * e.tone, 2 + e.rng() * 3, 0.05 + e.rng() * 0.12, 0.0002);
+    }
+  }
+  ev.source().connect(filter(e, "highpass", 50)).connect(filter(e, "lowpass", 9000 * e.tone)).connect(gain(e, 0.6 * k)).connect(e.bus);
 }
 
 // One sea "breath": slow swell, a crest, then a long receding hiss.
@@ -338,10 +449,12 @@ function waveCurves(e: Env, offset: number) {
   const n = Math.ceil(e.dur * rate);
   const level = new Float32Array(n);
   const bright = new Float32Array(n);
+  const crests: { t: number; size: number }[] = [];
   let t = -offset;
   while (t < e.dur) {
     const period = 6.5 + e.rng() * 5;
     const size = 0.6 + e.rng() * 0.4;
+    crests.push({ t: t + period * 0.42, size });
     for (let i = Math.max(0, Math.floor(t * rate)); i < Math.min(n, Math.floor((t + period) * rate)); i++) {
       const ph = (i / rate - t) / period;
       const env = ph < 0.42 ? Math.pow(ph / 0.42, 2) : Math.exp(-(ph - 0.42) * 4.5);
@@ -351,44 +464,68 @@ function waveCurves(e: Env, offset: number) {
     t += period * (0.85 + e.rng() * 0.25);
   }
   return {
+    crests,
     level: level.map((v) => 0.06 + v * 0.55 * e.intensity),
     bright: bright.map((v) => (280 + v * 2600) * e.tone),
   };
 }
 
 function layerWaves(e: Env) {
+  const ev = new Events(e);
   for (let v = 0; v < 2; v++) {
-    const { level, bright } = waveCurves(e, e.rng() * 5);
+    const side = v ? 0.45 : -0.45;
+    const { crests, level, bright } = waveCurves(e, e.rng() * 5);
     const lp = filter(e, "lowpass", 800, 0.5);
     automate(e, lp.frequency, bright);
     const g = gain(e, 0);
     automate(e, g.gain, level);
-    noise(e, "pink").connect(lp).connect(g).connect(pan(e, v ? 0.45 : -0.45)).connect(e.bus);
+    noise(e, "pink").connect(lp).connect(g).connect(pan(e, side)).connect(e.bus);
+
+    for (const c of crests) {
+      if (c.t < 0 || c.t >= e.dur) continue;
+      // The break: a soft low thump as the lip of the wave lands.
+      tick(e, ev, c.t, side * 0.6, 60 + e.rng() * 50, 1.2, 0.15 * c.size * e.intensity, 0.03);
+      // Then the foam: thousands of tiny bubbles popping as the wash spreads up the sand,
+      // dense at first and thinning out as the water slides back.
+      const fizzLen = 2.5 + e.rng() * 2;
+      const peakRate = 450 * c.size * e.intensity;
+      for (let t = 0; t < fizzLen; t += nextGap(e.rng, peakRate * Math.exp(-t / (fizzLen * 0.35)))) {
+        bubble(e, ev, c.t + 0.1 + t, side + (e.rng() - 0.5) * 0.9, (2000 + e.rng() * 5500) * e.tone, (0.025 + e.rng() * 0.07) * c.size, 0.2 + e.rng() * 0.6);
+      }
+    }
   }
+  ev.source().connect(e.bus);
   noise(e, "brown").connect(filter(e, "lowpass", 220)).connect(gain(e, 0.12)).connect(e.bus);
 }
 
 function layerStream(e: Env) {
   const k = e.intensity;
-  noise(e, "white").connect(filter(e, "bandpass", 1600 * e.tone, 0.7)).connect(gain(e, 0.06 * k)).connect(e.bus);
+  // The rush of the current: two bands of noise whose centre drifts as the flow shifts.
+  noise(e, "white").connect(filter(e, "bandpass", 1600 * e.tone, 0.7)).connect(gain(e, 0.05 * k)).connect(e.bus);
+  const band = filter(e, "bandpass", 650 * e.tone, 1);
+  automate(e, band.frequency, wander(e.rng, e.dur / 1.5, 450 * e.tone, 900 * e.tone));
   const g = gain(e, 0);
-  automate(e, g.gain, wander(e.rng, e.dur / 2, 0.08, 0.16 * k));
-  noise(e, "pink").connect(filter(e, "bandpass", 650 * e.tone, 1)).connect(g).connect(e.bus);
+  automate(e, g.gain, wander(e.rng, e.dur * 3, 0.07, 0.15 * k, 4096));
+  noise(e, "pink").connect(band).connect(g).connect(e.bus);
 
+  // The babble: bubbles from a few spots along the bed — water spilling over stones — each with
+  // its own pace that surges and eases, so the stream gurgles rather than fizzing evenly.
   const ev = new Events(e);
-  const bubbles = Math.round(e.dur * 38 * k);
-  for (let b = 0; b < bubbles; b++) {
-    const f0 = (380 + e.rng() * 1500) * e.tone;
-    const n = Math.floor(e.sr * (0.008 + e.rng() * 0.025));
-    const amp = 0.025 + e.rng() * 0.07;
-    let phase = 0;
-    ev.add(e.rng() * e.dur, n, (e.rng() - 0.5) * 1.4, (i) => {
-      // A bubble's pitch rises as it shrinks — that rising blip is what makes water sound wet.
-      phase += (2 * Math.PI * f0 * (1 + (1.8 * i) / n)) / e.sr;
-      return Math.sin(phase) * Math.sin((Math.PI * i) / n) * amp;
-    });
+  const spots = 3 + Math.floor(e.rng() * 3);
+  for (let s = 0; s < spots; s++) {
+    const p = (e.rng() - 0.5) * 1.6;
+    const surge = wander(e.rng, e.dur * 1.5, 0.1, 1, 4096);
+    const rate = ((40 + e.rng() * 40) * k) / spots;
+    // Each spot has a typical bubble size; deeper pools make larger, lower bubbles.
+    const centre = 500 + e.rng() * 900;
+    for (let t = nextGap(e.rng, rate); t < e.dur; t += nextGap(e.rng, rate * Math.pow(curveAt(e, surge, t), 2) * 2)) {
+      // Small bubbles are far more common than big ones.
+      const f0 = centre * Math.pow(2, (e.rng() - 0.3) * 2.2) * e.tone;
+      const amp = (0.03 + e.rng() * 0.08) * Math.min(1.5, 700 / f0);
+      bubble(e, ev, t, p + (e.rng() - 0.5) * 0.2, f0, amp, 0.1 + e.rng() * 0.9);
+    }
   }
-  ev.source().connect(gain(e, 0.8)).connect(e.bus);
+  ev.source().connect(gain(e, 0.9)).connect(e.bus);
 }
 
 function layerCrickets(e: Env) {
