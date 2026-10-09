@@ -144,7 +144,7 @@ const MOD_KEY = isMac ? "⌘" : "Ctrl";
 
 // Keep in sync with the version in package.json, src-tauri/tauri.conf.json, and
 // src-tauri/Cargo.toml — those are what actually drive the build; this is just for display.
-const APP_VERSION = "1.0.12";
+const APP_VERSION = "1.0.13";
 
 export default function Home() {
   const [query, setQuery] = useState("");
@@ -207,61 +207,118 @@ export default function Home() {
   // List available audio output devices for the picker in Preferences — lets you route
   // Hushwave's sound to a specific device (e.g. a virtual audio cable) instead of just the
   // system default, which OBS can then capture directly and reliably.
-  useEffect(() => {
-    const refresh = async () => {
-      if (!navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== "function") {
-        setOutputDevices([]);
-        setDeviceDiagnostic(
-          `Audio device listing isn't available in this window (isSecureContext: ${window.isSecureContext}). This is a WebView limitation, not a Hushwave setting — try updating WebView2.`
-        );
-        return;
-      }
-      try {
-        let devices = await navigator.mediaDevices.enumerateDevices();
-        let outputs = devices.filter((d) => d.kind === "audiooutput");
-        // Some WebView engines blank out device info entirely without a permission grant, even
-        // for outputs (which normally don't need one in a real browser). Try once to unlock it.
-        if (outputs.length === 0 || outputs.every((d) => !d.label && !d.deviceId)) {
-          try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            stream.getTracks().forEach((t) => t.stop());
-            devices = await navigator.mediaDevices.enumerateDevices();
-            outputs = devices.filter((d) => d.kind === "audiooutput");
-          } catch {
-            // No input device, or permission denied — fall through with whatever we already have.
-          }
+  //
+  // This deliberately never asks for microphone access on its own: opening the mic makes
+  // Windows treat Hushwave like a call (which can duck or reroute audio) and can pop a
+  // permission prompt inside the WebView. Full device names are only unlocked when you press
+  // "Show all devices" in Preferences.
+  const refreshDevices = async (unlockNames = false) => {
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== "function") {
+      setOutputDevices([]);
+      setDeviceDiagnostic(
+        `Audio device listing isn't available in this window (isSecureContext: ${window.isSecureContext}). This is a WebView limitation, not a Hushwave setting — try updating WebView2.`
+      );
+      return;
+    }
+    try {
+      if (unlockNames) {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          stream.getTracks().forEach((t) => t.stop());
+        } catch {
+          toast.error("Windows didn't allow access, so device names can't be listed. Playback through the system default still works.");
         }
-        setOutputDevices(outputs);
-        setDeviceDiagnostic(outputs.length === 0 ? "The system reported zero audio output devices when asked — this looks like a WebView2/Windows issue outside Hushwave." : null);
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        setOutputDevices([]);
-        setDeviceDiagnostic(`Couldn't list audio devices: ${message}`);
       }
-    };
-    refresh();
-    navigator.mediaDevices?.addEventListener?.("devicechange", refresh);
-    return () => navigator.mediaDevices?.removeEventListener?.("devicechange", refresh);
+      const outputs = (await navigator.mediaDevices.enumerateDevices()).filter((d) => d.kind === "audiooutput" && d.deviceId && d.deviceId !== "default");
+      setOutputDevices(outputs);
+      setDeviceDiagnostic(null);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setOutputDevices([]);
+      setDeviceDiagnostic(`Couldn't list audio devices: ${message}`);
+    }
+  };
+
+  useEffect(() => {
+    const onChange = () => refreshDevices();
+    refreshDevices();
+    navigator.mediaDevices?.addEventListener?.("devicechange", onChange);
+    return () => navigator.mediaDevices?.removeEventListener?.("devicechange", onChange);
   }, []);
 
   useEffect(() => {
     localStorage.setItem(OUTPUT_DEVICE_KEY, outputDeviceId);
   }, [outputDeviceId]);
 
-  // Applies the chosen output device to every audio element Hushwave uses. setSinkId isn't in
-  // every TS lib version's DOM types yet, hence the local casts.
+  const outputDeviceLabel = outputDeviceId
+    ? outputDevices.find((d) => d.deviceId === outputDeviceId)?.label || "a specific device"
+    : "System default";
+
+  // Applies the chosen output device to every audio element Hushwave uses. If the saved device
+  // is gone (unplugged, renamed, or a virtual cable that was uninstalled), switching to it fails
+  // — so fall back to the system default instead of leaving playback silent or stuck.
+  // setSinkId isn't in every TS lib version's DOM types yet, hence the local casts.
   useEffect(() => {
     const elements = [audioRef.current, ...mixAudioRefs.current].filter((el): el is HTMLAudioElement => !!el);
+    let reported = false;
     for (const el of elements) {
       const withSink = el as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> };
       if (typeof withSink.setSinkId !== "function") continue;
-      withSink.setSinkId(outputDeviceId || "default").catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
-        toast.error(`Couldn't switch audio output device: ${message}`);
+      withSink.setSinkId(outputDeviceId).catch((err: unknown) => {
         console.error("Hushwave setSinkId error:", err);
+        if (reported) return;
+        reported = true;
+        if (outputDeviceId) {
+          setOutputDeviceId("");
+          toast.error("Your chosen audio output device isn't available any more — switched back to the system default.");
+        } else {
+          const message = err instanceof Error ? err.message : String(err);
+          toast.error(`Couldn't use the system default audio output: ${message}`);
+        }
       });
     }
   }, [outputDeviceId, active]);
+
+  // Plays a short two-note chime through the currently selected output, independent of the
+  // library — the quickest way to tell "Hushwave isn't making sound" apart from "the sound is
+  // going somewhere you're not listening".
+  const playTestSound = async () => {
+    try {
+      const sr = 44100;
+      const ctx = new OfflineAudioContext(1, sr * 1.2, sr);
+      [660, 880].forEach((f, i) => {
+        const o = ctx.createOscillator();
+        o.frequency.value = f;
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0, i * 0.35);
+        g.gain.linearRampToValueAtTime(0.5, i * 0.35 + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.001, i * 0.35 + 0.8);
+        o.connect(g).connect(ctx.destination);
+        o.start(i * 0.35);
+        o.stop(i * 0.35 + 0.85);
+      });
+      const rendered = await ctx.startRendering();
+      const data = rendered.getChannelData(0);
+      const view = new DataView(new ArrayBuffer(44 + data.length * 2));
+      const w = (o: number, t: string) => { for (let i = 0; i < t.length; i++) view.setUint8(o + i, t.charCodeAt(i)); };
+      w(0, "RIFF"); view.setUint32(4, 36 + data.length * 2, true); w(8, "WAVEfmt ");
+      view.setUint32(16, 16, true); view.setUint16(20, 1, true); view.setUint16(22, 1, true);
+      view.setUint32(24, sr, true); view.setUint32(28, sr * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+      w(36, "data"); view.setUint32(40, data.length * 2, true);
+      data.forEach((v, i) => view.setInt16(44 + i * 2, Math.max(-1, Math.min(1, v)) * 0x7fff, true));
+      const url = URL.createObjectURL(new Blob([view.buffer], { type: "audio/wav" }));
+      const el = new Audio(url) as HTMLAudioElement & { setSinkId?: (id: string) => Promise<void> };
+      if (outputDeviceId && typeof el.setSinkId === "function") await el.setSinkId(outputDeviceId);
+      el.volume = 1;
+      el.onended = () => URL.revokeObjectURL(url);
+      await el.play();
+      toast(`Test sound sent to: ${outputDeviceLabel}. Didn't hear it? Check that output in the Windows volume mixer, or pick another one here.`);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.error(`Couldn't play the test sound: ${message}`);
+      console.error("Hushwave test sound error:", err);
+    }
+  };
 
   // Single source of truth for actually driving the <audio> element: whenever the active
   // track or the playing/paused intent changes, sync the real element to match. This is what
@@ -844,11 +901,20 @@ export default function Home() {
                 <SelectTrigger className="w-full border-white/10 bg-black/20 text-sm"><SelectValue /></SelectTrigger>
                 <SelectContent>
                   <SelectItem value="__default__">System default</SelectItem>
+                  {outputDeviceId && !outputDevices.some((d) => d.deviceId === outputDeviceId) && (
+                    <SelectItem value={outputDeviceId}>Saved device (not currently listed)</SelectItem>
+                  )}
                   {outputDevices.map((d) => (
                     <SelectItem key={d.deviceId} value={d.deviceId}>{d.label || `Output ${d.deviceId.slice(0, 8)}`}</SelectItem>
                   ))}
                 </SelectContent>
               </Select>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button onClick={playTestSound} className="flex items-center gap-1.5 rounded-lg border border-white/15 px-3 py-1.5 text-xs text-white/75 transition hover:border-white/30 hover:text-white"><Volume2 size={13} /> Play test sound</button>
+                {outputDevices.every((d) => !d.label) && (
+                  <button onClick={() => refreshDevices(true)} title="Windows only shares device names after a one-time microphone permission. Hushwave never records anything." className="rounded-lg border border-white/10 px-3 py-1.5 text-xs text-white/50 transition hover:border-white/25 hover:text-white">Show all devices by name</button>
+                )}
+              </div>
               {deviceDiagnostic ? (
                 <p className="mt-2 text-[11px] leading-4 text-amber-300/80">{deviceDiagnostic}</p>
               ) : (
@@ -1126,6 +1192,13 @@ export default function Home() {
                 <input aria-label="Volume" type="range" min="0" max="100" value={volume} onChange={(e) => { setVolume(Number(e.target.value)); setMuted(false); }} className={`h-1 flex-1 accent-violet-300 ${muted ? "opacity-40" : ""}`} />
                 <span className="w-10 text-right text-[11px] text-white/35">{muted ? "muted" : `${volume}%`}</span>
               </div>
+              {outputDeviceId && (
+                <div className="mt-4 flex items-center gap-2 rounded-xl border border-amber-300/25 bg-amber-300/10 px-3 py-2 text-[11px] text-amber-100">
+                  <AlertTriangle size={13} className="shrink-0" />
+                  <span className="min-w-0 flex-1 truncate" title={outputDeviceLabel}>Sound is going to {outputDeviceLabel}, not your default speakers.</span>
+                  <button onClick={() => setOutputDeviceId("")} className="shrink-0 font-semibold hover:text-white">Use default</button>
+                </div>
+              )}
               <div className="mt-7 border-t border-white/10 pt-5">
                 <div className="mb-1 flex items-center justify-between">
                   <span className="flex items-center gap-2 text-xs text-white/60"><SlidersHorizontal size={14} /> Quick mix</span>

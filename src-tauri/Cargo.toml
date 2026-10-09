@@ -1,6 +1,6 @@
 [package]
 name = "hushwave"
-version = "1.0.12"
+version = "1.0.13"
 description = "A native Windows ambient noise player with an original, DMCA-safe built-in library, plus optional online sound sources you provide your own key for."
 authors = ["Hushwave"]
 edition = "2021"
