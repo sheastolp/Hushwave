@@ -20,7 +20,6 @@ Hushwave is a native Windows desktop app (built with [Tauri](https://tauri.app) 
 - [Troubleshooting](#troubleshooting)
 - [Building from source](#building-from-source)
 - [Privacy](#privacy)
-- [License](#license)
 
 ---
 
@@ -209,9 +208,3 @@ Installers are written to `src-tauri\target\release\bundle\`.
 - Settings and API keys are stored only on your computer.
 - The internet is used only if **you** choose Freesound or ElevenLabs, and then only to send your prompt to that service using your own key.
 - Microphone permission is requested only if you click **Show all devices by name**, and only so Windows will reveal device names. Nothing is ever recorded.
-
----
-
-## License
-
-MIT. Hushwave's built-in sounds and on-device generated sounds are original. Sounds from Freesound are CC0 (public domain); sounds from ElevenLabs are governed by your ElevenLabs account terms.
