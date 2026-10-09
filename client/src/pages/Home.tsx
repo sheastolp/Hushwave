@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { generateAmbientTrack, generateAmbientTrackViaApi, generateAmbientTrackViaFreesound, SoundApiError } from "@/lib/generateAmbient";
+import { generateAmbientTrack, generateAmbientTrackViaApi, generateAmbientTrackViaFreesound, readPrompt, SoundApiError, type GeneratedTrack } from "@/lib/generateAmbient";
 import { toast } from "sonner";
 import {
   Dialog,
@@ -115,7 +115,21 @@ const EMPTY_MIX: MixSlot[] = [
   { soundId: "", volume: 0 },
 ];
 
-const prompts = ["rain on a skylight", "late-night train cabin", "warm analog room tone"];
+const prompts = [
+  "rain on a tent with distant thunder",
+  "crackling fireplace in a cozy cabin",
+  "forest stream with birds at dawn",
+  "moonlit night with crickets and soft wind",
+  "busy café on a rainy afternoon",
+  "deep space drone with soft chimes",
+];
+
+const GEN_LENGTH_KEY = "hushwave:generatedLength";
+const GEN_LENGTHS = [30, 60, 120];
+
+function formatLoopLength(seconds: number) {
+  return seconds >= 60 ? `${seconds / 60} min loop` : `${seconds}s loop`;
+}
 
 const SLEEP_OPTIONS = ["Off", "15 min", "30 min", "60 min", "90 min"];
 
@@ -130,7 +144,7 @@ const MOD_KEY = isMac ? "⌘" : "Ctrl";
 
 // Keep in sync with the version in package.json, src-tauri/tauri.conf.json, and
 // src-tauri/Cargo.toml — those are what actually drive the build; this is just for display.
-const APP_VERSION = "1.0.11";
+const APP_VERSION = "1.0.12";
 
 export default function Home() {
   const [query, setQuery] = useState("");
@@ -151,6 +165,13 @@ export default function Home() {
   const [apiKey, setApiKey] = useState(() => localStorage.getItem(API_KEY_KEY) || "");
   const [freesoundApiKey, setFreesoundApiKey] = useState(() => localStorage.getItem(FREESOUND_KEY_KEY) || "");
   const [generationMode, setGenerationMode] = useState<GenerationMode>(() => (localStorage.getItem(GEN_MODE_KEY) as GenerationMode) || "offline");
+  const [genLength, setGenLength] = useState(() => {
+    const stored = Number(localStorage.getItem(GEN_LENGTH_KEY));
+    return GEN_LENGTHS.includes(stored) ? stored : 60;
+  });
+  // How many times each prompt has been generated this session, so generating the same prompt
+  // again gives a fresh variation instead of the identical sound.
+  const promptVariations = useRef(new Map<string, number>());
   const [customSounds, setCustomSounds] = useState<Sound[]>([]);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -304,6 +325,10 @@ export default function Home() {
   useEffect(() => {
     localStorage.setItem(GEN_MODE_KEY, generationMode);
   }, [generationMode]);
+
+  useEffect(() => {
+    localStorage.setItem(GEN_LENGTH_KEY, String(genLength));
+  }, [genLength]);
 
   useEffect(() => {
     localStorage.setItem(HIDDEN_BUILTIN_KEY, JSON.stringify(hiddenBuiltInIds));
@@ -608,17 +633,33 @@ export default function Home() {
 
     setGenerating(true);
 
-    const addTrack = (source: string, subtitle: string, tags: string[] = ["generated", "original", "your prompt"]) => {
-      const next: Sound = { id: `generated-${Date.now()}`, title: text.replace(/^./, (c) => c.toUpperCase()), subtitle, tags, color: "from-lime-400/60 to-emerald-950/80", duration: "0:20 loop", source };
+    const key = text.toLowerCase();
+    const variation = promptVariations.current.get(key) ?? 0;
+    promptVariations.current.set(key, variation + 1);
+    const baseTitle = text.replace(/^./, (c) => c.toUpperCase());
+    const title = variation > 0 ? `${baseTitle} (take ${variation + 1})` : baseTitle;
+
+    const addTrack = (source: string, subtitle: string, tags: string[] = ["generated", "original", "your prompt"], duration = "0:20 loop") => {
+      const next: Sound = { id: `generated-${Date.now()}`, title, subtitle, tags, color: "from-lime-400/60 to-emerald-950/80", duration, source };
       setGeneratedSounds((prev) => [next, ...prev]);
       setActive(next);
       setPlaying(true);
     };
 
+    const addOfflineTrack = (track: GeneratedTrack) =>
+      addTrack(
+        track.url,
+        [track.labels.join(" + "), ...track.modifiers].join(" · ") + " · made on-device",
+        ["generated", ...track.labels.slice(0, 2)],
+        formatLoopLength(track.durationSeconds)
+      );
+
+    const runOffline = () => generateAmbientTrack(text, { durationSeconds: genLength, variation }).then(addOfflineTrack);
+
     const fallbackToOffline = (label: string, err: unknown) => {
       const message = err instanceof SoundApiError ? err.message : `The ${label} request failed.`;
       toast.error(`${label} generation failed — used the offline generator instead. (${message})`);
-      return generateAmbientTrack(text).then((url) => addTrack(url, "Generated texture · instrumental · original"));
+      return runOffline();
     };
 
     let task: Promise<void>;
@@ -633,15 +674,12 @@ export default function Home() {
         (err: unknown) => fallbackToOffline("Freesound", err)
       );
     } else {
-      task = generateAmbientTrack(text).then((url) => addTrack(url, "Generated texture · instrumental · original"));
+      task = runOffline();
     }
 
     task
       .catch(() => toast.error("Sound generation failed."))
-      .finally(() => {
-        setGenerating(false);
-        setPrompt("");
-      });
+      .finally(() => setGenerating(false));
   };
 
   // What the Prompt studio badge/description actually says depends on where the audio is
@@ -652,7 +690,10 @@ export default function Home() {
       ? { badge: "CC0 recordings, not original", description: "Describe a mood, place, or texture. Hushwave searches Freesound for a real, CC0-licensed recording matching it — not a Hushwave original, but free and safe to use." }
       : generationMode === "elevenlabs"
       ? { badge: "AI-generated by ElevenLabs", description: "Describe a mood, place, or texture. Hushwave asks your ElevenLabs account to generate audio matching it — this is ElevenLabs' output, not an original Hushwave recording." }
-      : { badge: "original · generated on-device", description: "Describe a mood, place, or texture. Hushwave synthesizes a fresh, original ambient layer right here on your device — nothing downloaded, nothing borrowed." };
+      : { badge: "original · generated on-device", description: "Describe a place, mood, or mix of sounds — rain, thunder, fireplace, waves, stream, birds, crickets, wind, city, café, train, hum, drone, chimes, or a warm pad. Hushwave layers up to five of them and synthesizes a seamless loop right here on your device — nothing downloaded, nothing borrowed." };
+
+  const promptReading = generationMode === "offline" && prompt.trim() ? readPrompt(prompt) : null;
+  const promptTimesMade = promptVariations.current.get(prompt.trim().toLowerCase()) ?? 0;
 
   const progress = trackDuration > 0 ? Math.min(currentTime / trackDuration, 1) : 0;
   const mixInUse = mixSlots.some((s) => s.soundId && s.volume > 0);
@@ -785,6 +826,16 @@ export default function Home() {
                 </div>
               )}
               {generationMode !== "offline" && <p className={helpText}>If an online request fails, Hushwave falls back to the offline generator automatically.</p>}
+              <div className="mt-4">
+                <div className={fieldLabel}>Length of on-device sounds</div>
+                <Select value={String(genLength)} onValueChange={(v) => setGenLength(Number(v))}>
+                  <SelectTrigger className="w-full border-white/10 bg-black/20 text-sm"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    {GEN_LENGTHS.map((n) => <SelectItem key={n} value={String(n)}>{formatLoopLength(n)}{n === 60 ? " (recommended)" : ""}</SelectItem>)}
+                  </SelectContent>
+                </Select>
+                <p className={helpText}>Every generated sound loops seamlessly. Longer loops repeat less noticeably but take a moment longer to make.</p>
+              </div>
             </section>
 
             <section>
@@ -986,8 +1037,16 @@ export default function Home() {
             )}
             <div className="mt-5 flex flex-col gap-3 sm:flex-row">
               <input ref={promptInputRef} value={prompt} onChange={(e) => setPrompt(e.target.value)} onKeyDown={(e) => e.key === "Enter" && generate()} placeholder="e.g. moonlit greenhouse with soft rain" className="min-w-0 flex-1 rounded-xl border border-white/10 bg-black/20 px-4 py-3 text-sm outline-none placeholder:text-white/30 focus:border-violet-300/60" />
-              <button onClick={generate} disabled={generating || !prompt.trim() || missingKey} className="flex items-center justify-center gap-2 rounded-xl bg-violet-300 px-5 py-3 text-sm font-semibold text-[#17131f] transition hover:bg-violet-200 disabled:cursor-not-allowed disabled:opacity-50">{generating ? <><Loader2 size={15} className="animate-spin" /> Creating…</> : <><Sparkles size={15} /> Generate</>}</button>
+              <button onClick={generate} disabled={generating || !prompt.trim() || missingKey} className="flex items-center justify-center gap-2 rounded-xl bg-violet-300 px-5 py-3 text-sm font-semibold text-[#17131f] transition hover:bg-violet-200 disabled:cursor-not-allowed disabled:opacity-50">{generating ? <><Loader2 size={15} className="animate-spin" /> Creating…</> : <><Sparkles size={15} /> {promptTimesMade > 0 ? "New variation" : "Generate"}</>}</button>
             </div>
+            {promptReading && (
+              <div className="mt-3 flex flex-wrap items-center gap-1.5 text-[11px] text-white/45">
+                <span className="text-white/30">Will layer:</span>
+                {promptReading.labels.map((l) => <span key={l} className="rounded-full border border-violet-300/25 bg-violet-300/10 px-2 py-0.5 text-violet-100/80">{l}</span>)}
+                {promptReading.modifiers.map((m) => <span key={m} className="rounded-full border border-white/10 px-2 py-0.5 text-white/45">{m}</span>)}
+                <span className="text-white/30">· {formatLoopLength(genLength)}</span>
+              </div>
+            )}
             <div className="mt-3 flex flex-wrap items-center gap-2">
               <span className="text-[11px] text-white/30">Try:</span>
               {prompts.map((item) => <button key={item} onClick={() => { setPrompt(item); promptInputRef.current?.focus(); }} className="rounded-full border border-white/10 px-3 py-1.5 text-[11px] text-white/45 hover:border-white/25 hover:text-white/75">{item}</button>)}
